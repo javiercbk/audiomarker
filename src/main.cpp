@@ -13,9 +13,6 @@
 #include <sstream>
 #include <string>
 
-template<typename T> static inline T ImMin(T lhs, T rhs)                        { return lhs < rhs ? lhs : rhs; }
-template<typename T> static inline T ImMax(T lhs, T rhs)                        { return lhs >= rhs ? lhs : rhs; }
-
 class AudioVisualizer {
 public:
     AudioVisualizer() : windowWidth(1280), windowHeight(720) {
