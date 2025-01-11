@@ -7,7 +7,7 @@
             "request": "launch",
             "program": "${workspaceFolder}/build/audio_visualizer",
             "args": [
-                "${workspaceFolder}/80-med.wav"
+                "${workspaceFolder}/80-med-mono.wav"
             ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
