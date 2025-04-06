@@ -9,16 +9,26 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <fstream>
+#include <sstream>
+#include <string>
+
+template<typename T> static inline T ImMin(T lhs, T rhs)                        { return lhs < rhs ? lhs : rhs; }
+template<typename T> static inline T ImMax(T lhs, T rhs)                        { return lhs >= rhs ? lhs : rhs; }
 
 class AudioVisualizer {
 public:
-    AudioVisualizer() : windowWidth(1280), windowHeight(720) {}
+    AudioVisualizer() : windowWidth(1280), windowHeight(720) {
+        initAudioPlayback();
+    }
+
+    struct Marker {
+        size_t sample;
+        int intensity; // 0: Low, 1: Med, 2: High, 3: Very High
+    };
     
     bool init(const char* wavFile) {
-        if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
-            return false;
-        }
-
+        currentWavFile = wavFile;
         // Setup SDL window
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
@@ -55,10 +65,81 @@ public:
             return false;
         }
 
+        // Construct CSV filename (same base name as WAV file)
+        std::string csvFilename = std::string(wavFile);
+        size_t dotPos = csvFilename.find_last_of('.');
+        if (dotPos != std::string::npos) {
+            csvFilename = csvFilename.substr(0, dotPos) + ".csv";
+        }
+
+        // Load markers from CSV
+        std::ifstream csvFile(csvFilename);
+        if (csvFile.is_open()) {
+            std::string line;
+            while (std::getline(csvFile, line)) {
+                std::istringstream ss(line);
+                std::string sampleStr, intensityStr;
+                
+                // Parse sample number and intensity
+                if (std::getline(ss, sampleStr, ',') && 
+                    std::getline(ss, intensityStr)) {
+                    try {
+                        size_t sample = std::stoull(sampleStr);
+                        int intensity = std::stoi(intensityStr);
+                        
+                        // Validate intensity is within range
+                        if (intensity >= 0 && intensity < 4) {
+                            marks.push_back({sample, intensity});
+                        }
+                    } catch (const std::exception& e) {
+                        printf("Error parsing CSV line: %s\n", line.c_str());
+                    }
+                }
+            }
+            
+            // Sort markers after loading
+            std::sort(marks.begin(), marks.end(), 
+                [](const Marker& a, const Marker& b) { 
+                    return a.sample < b.sample; 
+                });
+            
+            printf("Loaded %zu markers from CSV\n", marks.size());
+        } else {
+            printf("No markers CSV found at %s\n", csvFilename.c_str());
+        }
+
         return true;
     }
 
+    void saveMarkersToCsv(const char* wavFile) {
+        // Construct CSV filename (same base name as WAV file)
+        std::string csvFilename = std::string(wavFile);
+        size_t dotPos = csvFilename.find_last_of('.');
+        if (dotPos != std::string::npos) {
+            csvFilename = csvFilename.substr(0, dotPos) + ".csv";
+        }
+
+        // Open file for writing
+        std::ofstream csvFile(csvFilename);
+        if (csvFile.is_open()) {
+            // Write each marker
+            for (const auto& marker : marks) {
+                csvFile << marker.sample << "," << marker.intensity << "\n";
+            }
+            
+            printf("Saved %zu markers to CSV: %s\n", marks.size(), csvFilename.c_str());
+        } else {
+            printf("Failed to open CSV for writing: %s\n", csvFilename.c_str());
+        }
+    }
+
     void cleanup() {
+        // Close audio device during cleanup
+        if (audioDevice != 0) {
+            SDL_CloseAudioDevice(audioDevice);
+        }
+
+        // Existing cleanup code...
         ImGui_ImplOpenGL3_Shutdown();
         ImGui_ImplSDL2_Shutdown();
         ImPlot::DestroyContext();
@@ -74,11 +155,12 @@ public:
         ImGui::NewFrame();
 
         ImGui::SetNextWindowPos(ImVec2(0, 0));
-        ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
-        ImGui::Begin("Waveform", nullptr, 
+        ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize, ImGuiCond_Always);
+        ImGui::Begin("Audio Visualizer", nullptr, 
             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
 
-            
+
+        ImGui::BeginChild("plot", ImVec2(ImGui::GetContentRegionAvail().x, ImGui::GetContentRegionAvail().y * 0.4), true);
         auto samples = audioProcessor.getSamples();
         static size_t base_sample = 0;
         if (ImPlot::BeginPlot("##Waveform", ImVec2(-1, -1))) {
@@ -128,23 +210,123 @@ public:
                 if (ImGui::IsMouseClicked(0) && ImGui::IsKeyDown(ImGuiKey_LeftCtrl)) {
                     printf("Clicked at sample %ld, num samples: %ld\n", mousePosX, audioProcessor.getNumSamples());
                     if (mousePosX > 0 && mousePosX < audioProcessor.getNumSamples()) {
-                        insertMarkSorted(mousePosX);
+                        insertMarkSorted(mousePosX, currentIntensity);
                     }
+                }
+                if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) {
+                    // FIXME: Figure this one out
+                    // ImPlot::SetupAxisLimits(ImAxis_X1, base_sample + keys_sample_jump_size, base_sample + keys_sample_jump_size + total_samples, ImGuiCond_Once);
+                }
+                if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) {
+                    // FIXME: Figure this one out
+                    // ImPlot::SetupAxisLimits(ImAxis_X1, base_sample - keys_sample_jump_size, base_sample - keys_sample_jump_size + total_samples, ImGuiCond_Once);
+
                 }
             }
 
             ImPlot::PushStyleColor(ImPlotCol_Line, ImVec4(0.0f, 1.0f, 0.0f, 1.0f));
 		    ImPlot::PushStyleVar(ImPlotStyleVar_LineWeight, 1);
             std::vector<double> temp_marks;
+            std::vector<ImVec4> mark_colors;
             temp_marks.reserve(marks.size());
-            for (const size_t& mark : marks) {
-                temp_marks.push_back(static_cast<double>(mark));
+            mark_colors.reserve(marks.size());
+            for (const auto& mark : marks) {
+                temp_marks.push_back(static_cast<double>(mark.sample));
+                mark_colors.push_back(intensityColors[mark.intensity]);
             }
-            ImPlot::PlotInfLines("audio marks", temp_marks.data(), temp_marks.size());
+            for (size_t i = 0; i < temp_marks.size(); ++i) {
+                ImPlot::PushStyleColor(ImPlotCol_Line, mark_colors[i]);
+                ImPlot::PushStyleVar(ImPlotStyleVar_LineWeight, 1);
+                ImPlot::PlotInfLines("audio marks", &temp_marks[i], 1);
+                ImPlot::PopStyleColor();
+                ImPlot::PopStyleVar();
+            }
             ImPlot::PopStyleColor();
 		    ImPlot::PopStyleVar();
             ImPlot::EndPlot();
         }
+
+        ImGui::EndChild();
+
+        ImGui::BeginChild("ControlPanel", ImVec2(ImGui::GetContentRegionAvail().x, 200), true);
+
+        // Split the child window into two columns
+        ImGui::Columns(2, "ControlColumns", true);
+        
+        // Left column - List of rows
+        ImGui::SetColumnWidth(0, ImGui::GetWindowWidth() * 0.7f);
+        {
+            ImGui::Text("Markers");
+            ImGui::Separator();
+            
+            // Scrollable list of markers
+            ImGui::BeginChild("MarkerList", ImVec2(0, 150), true);
+            for (size_t i = 0; i < marks.size(); ++i) {
+                ImGui::PushID(i);
+                
+                ImGui::Text("Sample %zu", marks[i].sample);
+                ImGui::SameLine(ImGui::GetWindowWidth() * 0.4f);
+                
+                ImGui::TextColored(
+                    intensityColors[marks[i].intensity], 
+                    "%s", 
+                    intensityLevels[marks[i].intensity]
+                );
+                ImGui::SameLine(ImGui::GetWindowWidth() * 0.6f);
+                
+                if (ImGui::Button("Play")) {
+                    // Play audio from this marker
+                    playAudioSegment(marks[i].sample);
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("See")) {
+                    printf("See marker %zu\n", i);
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Delete")) {
+                    marks.erase(marks.begin() + i);
+                    i--; // Adjust loop counter
+                    // Save to CSV after deletion
+                    saveMarkersToCsv(currentWavFile.c_str());
+                }
+                
+                ImGui::Separator();
+                ImGui::PopID();
+            }
+            ImGui::EndChild();
+        }
+        
+        // Right column - Dropdown and additional controls
+        ImGui::NextColumn();
+        {
+            const char* intensityLevels[] = {"Low", "Med", "High", "Very High"};
+            
+            // Dropdown for intensity
+            ImGui::Text("Intensity Level");
+            if (ImGui::BeginCombo("##Intensity", intensityLevels[currentIntensity])) {
+                for (int n = 0; n < 4; n++) {
+                    bool is_selected = (currentIntensity == n);
+                    if (ImGui::Selectable(intensityLevels[n], is_selected)) {
+                        currentIntensity = n;
+                    }
+                    if (is_selected) {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            
+            // Keyboard shortcuts for intensity
+            ImGuiIO& io = ImGui::GetIO();
+            if (io.KeysDown[ImGuiKey_1]) currentIntensity = 0;
+            if (io.KeysDown[ImGuiKey_2]) currentIntensity = 1;
+            if (io.KeysDown[ImGuiKey_3]) currentIntensity = 2;
+            if (io.KeysDown[ImGuiKey_4]) currentIntensity = 3;
+        }
+        
+        ImGui::Columns(1);
+        ImGui::EndChild();
+
 
         ImGui::End();
 
@@ -174,16 +356,83 @@ public:
 private:
     SDL_Window* window = nullptr;
     SDL_GLContext glContext = nullptr;
+    SDL_AudioDeviceID audioDevice = 0;
+    std::vector<float> playbackBuffer;
+    bool isPlaying = false;
     int windowWidth, windowHeight;
     AudioProcessor audioProcessor;
-    std::vector<size_t> marks;
+    int currentIntensity = 0;
+    std::vector<Marker> marks;
+    std::string currentWavFile;
+    const char* intensityLevels[4] = {"Low", "Med", "High", "Very High"};
 
-    void insertMarkSorted(size_t mark) {
+    ImVec4 intensityColors[4] = {
+        ImVec4(0.4f, 0.8f, 0.4f, 1.0f),   // blue for Low
+        ImVec4(1.0f, 1.0f, 0.0f, 1.0f),   // Yellow for Med
+        ImVec4(1.0f, 0.5f, 0.0f, 1.0f),   // Orange for High
+        ImVec4(1.0f, 0.0f, 0.0f, 1.0f)    // Red for Very High
+    };
+
+    void insertMarkSorted(size_t mark, int currentIntensity) {
         // Find the position where mark should be inserted
-        auto pos = lower_bound(marks.begin(), marks.end(), mark);
+        auto pos = lower_bound(marks.begin(), marks.end(), mark, 
+            [](const Marker& a, size_t b) { return a.sample < b; });
         
         // Insert at the found position
-        marks.insert(pos, mark);
+        marks.insert(pos, {mark, currentIntensity});
+        
+        // Save to CSV
+        saveMarkersToCsv(currentWavFile.c_str());
+    }
+
+    void initAudioPlayback() {
+        SDL_AudioSpec want, have;
+        SDL_zero(want);
+        want.freq = audioProcessor.getSampleRate();
+        want.format = AUDIO_F32;
+        want.channels = 1;
+        want.samples = 4096;
+        want.callback = nullptr; // We'll use SDL_QueueAudio for streaming
+
+        audioDevice = SDL_OpenAudioDevice(
+            nullptr, 0, &want, &have, 
+            SDL_AUDIO_ALLOW_FORMAT_CHANGE
+        );
+
+        if (audioDevice == 0) {
+            printf("Failed to open audio device: %s\n", SDL_GetError());
+        }
+    }
+
+    void playAudioSegment(size_t startSample) {
+        // Stop any ongoing playback
+        if (isPlaying) {
+            SDL_PauseAudioDevice(audioDevice, 1);
+            SDL_ClearQueuedAudio(audioDevice);
+        }
+
+        // Get samples from AudioProcessor
+        auto samples = audioProcessor.getSamples();
+        
+        // Ensure we don't overflow
+        size_t segmentLength = 2000;
+        size_t endSample = std::min(startSample + segmentLength, samples.size());
+        
+        // Create playback buffer
+        playbackBuffer.clear();
+        playbackBuffer.insert(
+            playbackBuffer.begin(), 
+            samples.begin() + startSample, 
+            samples.begin() + endSample
+        );
+
+        // Queue audio
+        SDL_QueueAudio(audioDevice, playbackBuffer.data(), 
+            playbackBuffer.size() * sizeof(float));
+        
+        // Start playback
+        SDL_PauseAudioDevice(audioDevice, 0);
+        isPlaying = true;
     }
 };
 
@@ -192,6 +441,12 @@ int main(int argc, char* argv[]) {
         printf("Usage: %s <wav_file>\n", argv[0]);
         return 1;
     }
+
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_AUDIO) != 0) {
+        printf("SDL initialization failed: %s\n", SDL_GetError());
+        return 1;
+    }
+
 
     AudioVisualizer visualizer;
     if (!visualizer.init(argv[1])) {

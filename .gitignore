@@ -1,2 +1,4 @@
 build/
 *.wav
+*.csv
+*.ini
