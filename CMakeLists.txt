@@ -49,8 +49,9 @@ FetchContent_MakeAvailable(imgui)
 # ImPlot
 FetchContent_Declare(
     implot
-    GIT_REPOSITORY https://github.com/epezent/implot
-    GIT_TAG v0.16
+    GIT_REPOSITORY https://github.com/javiercbk/implot
+    GIT_TAG v0.0.1
+    # SOURCE_DIR /<workspace>/implot
 )
 FetchContent_MakeAvailable(implot)
 
