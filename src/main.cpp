@@ -24,7 +24,8 @@ public:
 
     struct Marker {
         size_t sample;
-        int intensity; // 0: Low, 1: Med, 2: High, 3: Very High
+        int intensity; // -1: section, 0: Low, 1: Med, 2: High, 3: Very High
+        size_t end;
     };
     
     bool init(const char* wavFile) {
@@ -78,17 +79,18 @@ public:
             std::string line;
             while (std::getline(csvFile, line)) {
                 std::istringstream ss(line);
-                std::string sampleStr, intensityStr;
+                std::string sampleStr, intensityStr, endStr;
                 
                 // Parse sample number and intensity
                 if (std::getline(ss, sampleStr, ',') && 
-                    std::getline(ss, intensityStr)) {
+                    std::getline(ss, intensityStr, ',')) {
                     try {
                         size_t sample = std::stoull(sampleStr);
                         int intensity = std::stoi(intensityStr);
-                        
-                        // Validate intensity is within range
-                        if (intensity >= 0 && intensity < 4) {
+                        if (intensity == -1 && std::getline(ss, endStr)) {
+                            size_t end = std::stoull(endStr);
+                            marks.push_back({sample, intensity, end});
+                        } else {
                             marks.push_back({sample, intensity});
                         }
                     } catch (const std::exception& e) {
@@ -111,9 +113,9 @@ public:
         return true;
     }
 
-    void saveMarkersToCsv(const char* wavFile) {
+    void saveMarkersToCsv() {
         // Construct CSV filename (same base name as WAV file)
-        std::string csvFilename = std::string(wavFile);
+        std::string csvFilename = std::string(currentWavFile.c_str());
         size_t dotPos = csvFilename.find_last_of('.');
         if (dotPos != std::string::npos) {
             csvFilename = csvFilename.substr(0, dotPos) + ".csv";
@@ -124,7 +126,11 @@ public:
         if (csvFile.is_open()) {
             // Write each marker
             for (const auto& marker : marks) {
-                csvFile << marker.sample << "," << marker.intensity << "\n";
+                if (marker.end == 0) {
+                    csvFile << marker.sample << "," << marker.intensity << "\n";
+                } else {
+                    csvFile << marker.sample << "," << marker.intensity << "," << marker.end << "\n";
+                }
             }
             
             printf("Saved %zu markers to CSV: %s\n", marks.size(), csvFilename.c_str());
@@ -207,20 +213,19 @@ public:
                 ImPlot::PlotInfLines("audio marks", &mousePosDouble, 1);
                 ImPlot::PopStyleColor();
                 ImPlot::PopStyleVar();
-                if (ImGui::IsMouseClicked(0) && ImGui::IsKeyDown(ImGuiKey_LeftCtrl)) {
-                    printf("Clicked at sample %ld, num samples: %ld\n", mousePosX, audioProcessor.getNumSamples());
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && ImGui::IsKeyDown(ImGuiKey_LeftCtrl)) {
                     if (mousePosX > 0 && mousePosX < audioProcessor.getNumSamples()) {
                         insertMarkSorted(mousePosX, currentIntensity);
                     }
                 }
-                if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) {
-                    // FIXME: Figure this one out
-                    // ImPlot::SetupAxisLimits(ImAxis_X1, base_sample + keys_sample_jump_size, base_sample + keys_sample_jump_size + total_samples, ImGuiCond_Once);
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && ImGui::IsKeyDown(ImGuiKey_LeftAlt)) {
+                    if (mousePosX > 0 && mousePosX < audioProcessor.getNumSamples()) {
+                        insertSectionSorted(mousePosX, -1);
+                    }
                 }
-                if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) {
-                    // FIXME: Figure this one out
-                    // ImPlot::SetupAxisLimits(ImAxis_X1, base_sample - keys_sample_jump_size, base_sample - keys_sample_jump_size + total_samples, ImGuiCond_Once);
-
+                if (ImGui::IsKeyDown(ImGuiKey_Escape)) {
+                    // cancel selection
+                    section_mark = 0;
                 }
             }
 
@@ -230,14 +235,53 @@ public:
             std::vector<ImVec4> mark_colors;
             temp_marks.reserve(marks.size());
             mark_colors.reserve(marks.size());
-            for (const auto& mark : marks) {
-                temp_marks.push_back(static_cast<double>(mark.sample));
-                mark_colors.push_back(intensityColors[mark.intensity]);
+            int i = 0;
+            for (auto& mark : marks) {
+                if (mark.end == 0) {
+                    temp_marks.push_back(static_cast<double>(mark.sample));
+                    mark_colors.push_back(intensityColors[mark.intensity]);
+                } else {
+                    //FIXME: should crash because it will be writing memory to the stack when changed
+                    double start = (double) mark.sample;
+                    double end = (double) mark.end;
+                    double prev_start = start;
+                    double prev_end = end;
+                    bool clicked = false, hovered = false, held = false;
+                    ImVec4 color(1.0f, 0.0f, 0.0f, 0.5f); // Red, 50%
+                    ImPlot::DragRect(i, &start, &limits.Y.Min, &end, &limits.Y.Max, color, ImPlotDragToolFlags_None, &clicked, &hovered, &held);
+                    if (held) {
+                        if (prev_start != start || prev_end != end) {
+                            double min, max = 0.0;
+                            if (start < end) {
+                                min = std::max(start, 0.0);
+                                max = std::min(end, (double) audioProcessor.getNumSamples());
+                            } else {
+                                min = std::max(end, 0.0);
+                                max = std::min(start, (double) audioProcessor.getNumSamples());
+                            }
+                            mark.sample = min;
+                            mark.end = max;
+                            needsSectionsUpdate = i;
+                        }
+                    } else if (needsSectionsUpdate == i) {
+                        saveMarkersToCsv();
+                        needsSectionsUpdate = -1;
+                    }
+                }
+                i++;
             }
             for (size_t i = 0; i < temp_marks.size(); ++i) {
                 ImPlot::PushStyleColor(ImPlotCol_Line, mark_colors[i]);
                 ImPlot::PushStyleVar(ImPlotStyleVar_LineWeight, 1);
                 ImPlot::PlotInfLines("audio marks", &temp_marks[i], 1);
+                ImPlot::PopStyleColor();
+                ImPlot::PopStyleVar();
+            }
+            if (section_mark != 0) {
+                ImPlot::PushStyleColor(ImPlotCol_Line, ImVec4(1.0f, 0.0f, 0.0f, 0.5f));
+                ImPlot::PushStyleVar(ImPlotStyleVar_LineWeight, 1);
+                double d_section_mark = (double) section_mark;
+                ImPlot::PlotInfLines("mark", &d_section_mark, 1);
                 ImPlot::PopStyleColor();
                 ImPlot::PopStyleVar();
             }
@@ -266,12 +310,15 @@ public:
                 
                 ImGui::Text("Sample %zu", marks[i].sample);
                 ImGui::SameLine(ImGui::GetWindowWidth() * 0.4f);
-                
-                ImGui::TextColored(
-                    intensityColors[marks[i].intensity], 
-                    "%s", 
-                    intensityLevels[marks[i].intensity]
-                );
+                if (marks[i].intensity >= 0 ) {
+                    ImGui::TextColored(
+                        intensityColors[marks[i].intensity], 
+                        "%s", 
+                        intensityLevels[marks[i].intensity]
+                    );
+                } else {
+                    ImGui::Text("end %zu", marks[i].end);
+                }
                 ImGui::SameLine(ImGui::GetWindowWidth() * 0.6f);
                 
                 if (ImGui::Button("Play")) {
@@ -287,7 +334,7 @@ public:
                     marks.erase(marks.begin() + i);
                     i--; // Adjust loop counter
                     // Save to CSV after deletion
-                    saveMarkersToCsv(currentWavFile.c_str());
+                    saveMarkersToCsv();
                 }
                 
                 ImGui::Separator();
@@ -359,7 +406,9 @@ private:
     SDL_AudioDeviceID audioDevice = 0;
     std::vector<float> playbackBuffer;
     bool isPlaying = false;
+    int needsSectionsUpdate = -1;
     int windowWidth, windowHeight;
+    size_t section_mark = 0;
     AudioProcessor audioProcessor;
     int currentIntensity = 0;
     std::vector<Marker> marks;
@@ -382,7 +431,28 @@ private:
         marks.insert(pos, {mark, currentIntensity});
         
         // Save to CSV
-        saveMarkersToCsv(currentWavFile.c_str());
+        saveMarkersToCsv();
+    }
+
+    void insertSectionSorted(size_t mark, int currentIntensity) {
+        // Find the position where mark should be inserted
+        auto pos = lower_bound(marks.begin(), marks.end(), mark, 
+            [](const Marker& a, size_t b) { return a.sample < b; });
+        printf("section_mark = %ld\n", section_mark);
+        if (section_mark != 0) {
+            // Insert at the found position
+            // FIXME: remove marks between section_mark and mark.
+            size_t min_number = std::min(mark, section_mark);
+            size_t max_number = std::max(mark, section_mark);
+            marks.insert(pos, {min_number, currentIntensity, max_number});
+            // Save to CSV
+            saveMarkersToCsv();
+            section_mark = 0;
+            printf("section marked end\n");
+        } else {
+            printf("section marked start\n");
+            section_mark = mark;
+        }
     }
 
     void initAudioPlayback() {
